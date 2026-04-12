@@ -204,7 +204,7 @@ async def exchanges():
     return {"exchanges": configured}
 
 
-@app.get("/api/v1/market/{symbol}/ticker")
+@app.get("/api/v1/market/{symbol:path}/ticker")
 async def ticker(symbol: str, exchange: str = Query("binance")):
     try:
         import ccxt
@@ -228,3 +228,8 @@ async def ticker(symbol: str, exchange: str = Query("binance")):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("src.api.app:app", host="0.0.0.0", port=8000, reload=True)

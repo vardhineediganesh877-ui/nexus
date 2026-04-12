@@ -276,7 +276,7 @@ class ExecutionEngine:
             (id, signal_id, symbol, exchange, side, entry_price, quantity,
              stop_loss, take_profit, exit_price, pnl, pnl_pct, status, paper,
              timestamp_opened, timestamp_closed, metadata)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
             trade.id, trade.signal_id, trade.symbol, trade.exchange,
             trade.side.value, trade.entry_price, trade.quantity,
