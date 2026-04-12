@@ -7,7 +7,7 @@ weights their opinions, and produces a final trade signal.
 
 import logging
 from typing import List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 
 import ccxt
 
@@ -69,7 +69,7 @@ class SignalEngine:
             symbol=symbol,
             exchange=exchange_id,
             timeframe=timeframe,
-            timestamp=datetime.utcnow(),
+            timestamp=datetime.now(timezone.utc),
         )
 
         try:

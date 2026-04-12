@@ -8,7 +8,7 @@ which symbols, timeframes, and strategies work best.
 import json
 import os
 import subprocess
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -71,7 +71,7 @@ class KnowledgeEngine:
 
     def _write_or_append_page(self, path: Path, section: str, content: str) -> None:
         """Append a timeline entry to a brain page, creating it if needed."""
-        timestamp = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+        timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
         entry = f"\n### {timestamp}\n{content}\n"
 
@@ -149,7 +149,7 @@ class KnowledgeEngine:
             self._gbrain_call("kg_add_triple", {
                 "subject": symbol,
                 "predicate": f"TRADE_RESULT_{outcome}",
-                "object": f"{trade.id}@{datetime.utcnow().strftime('%Y-%m-%d')}",
+                "object": f"{trade.id}@{datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
             })
 
     def query_pattern(self, symbol: str) -> dict:

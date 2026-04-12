@@ -146,7 +146,7 @@ def cmd_backtest(args):
 def cmd_start(args):
     """Start the NEXUS autonomous scanner"""
     import time
-    from datetime import datetime
+    from datetime import datetime, timezone
     
     config = NexusConfig.from_env()
     if args.paper:
@@ -166,7 +166,7 @@ def cmd_start(args):
     while True:
         try:
             scan_count += 1
-            now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+            now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
             print(f"\n{'='*50}")
             print(f"Scan #{scan_count} — {now}")
             print(f"{'='*50}")

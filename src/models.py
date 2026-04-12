@@ -6,7 +6,7 @@ Every module speaks this language.
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Dict, List, Any
-from datetime import datetime
+from datetime import datetime, timezone
 import uuid
 
 
@@ -33,7 +33,7 @@ class AgentOpinion:
     confidence: float  # 0.0 - 1.0
     reasoning: str
     indicators: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     def to_dict(self) -> dict:
         return {
@@ -64,7 +64,7 @@ class TradeSignal:
     position_size_pct: float = 0.0  # Recommended % of portfolio
     risk_reward_ratio: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
-    timestamp: datetime = field(default_factory=datetime.utcnow)
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
     def agents_agree(self) -> bool:
@@ -155,7 +155,7 @@ class Trade:
     pnl_pct: Optional[float] = None
     status: str = "open"  # open, closed, cancelled
     paper: bool = True
-    timestamp_opened: datetime = field(default_factory=datetime.utcnow)
+    timestamp_opened: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     timestamp_closed: Optional[datetime] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 

@@ -10,7 +10,7 @@ import logging
 import sqlite3
 from pathlib import Path
 from typing import List, Optional, Dict
-from datetime import datetime
+from datetime import datetime, timezone
 
 import ccxt
 
@@ -110,7 +110,7 @@ class ExecutionEngine:
             exchange=signal.exchange,
             side=signal.side,
             paper=self.config.paper_mode,
-            timestamp_opened=datetime.utcnow(),
+            timestamp_opened=datetime.now(timezone.utc),
             metadata={
                 "confidence": signal.confidence,
                 "strength": signal.strength.value,
@@ -189,7 +189,7 @@ class ExecutionEngine:
                 trade.pnl = -trade.pnl
             trade.pnl_pct = trade.pnl / (trade.entry_price * trade.quantity) * 100
             trade.status = "closed"
-            trade.timestamp_closed = datetime.utcnow()
+            trade.timestamp_closed = datetime.now(timezone.utc)
 
             if not self.config.paper_mode and trade.metadata.get("order_id"):
                 exchange.cancel_order(trade.metadata["order_id"], trade.symbol)
