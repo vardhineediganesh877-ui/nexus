@@ -1,0 +1,25 @@
+services:
+  nexus:
+    build: .
+    container_name: nexus
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - NEXUS_PAPER=true
+      - NEXUS_DATA_DIR=/root/.nexus/data
+      - NEXUS_LOG_LEVEL=INFO
+      - NEXUS_SCAN_INTERVAL=30
+      - NEXUS_MIN_CONFIDENCE=0.65
+      - CCXT_MEXC_KEY=${CCXT_MEXC_KEY:-}
+      - CCXT_MEXC_SECRET=${CCXT_MEXC_SECRET:-}
+    volumes:
+      - nexus-data:/root/.nexus/data
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+
+volumes:
+  nexus-data:

@@ -18,6 +18,7 @@ from .config import NexusConfig
 from .analysis.engine import SignalEngine
 from .analysis.backtest import BacktestEngine
 from .execution.engine import ExecutionEngine
+from .telegram.bot import TelegramBot
 
 logger = logging.getLogger("nexus")
 
@@ -197,6 +198,22 @@ def cmd_start(args):
             time.sleep(60)
 
 
+def cmd_telegram(args):
+    """Start Telegram bot message processor (stdin mode for OpenClaw integration)"""
+    config = NexusConfig.from_env()
+    bot = TelegramBot(config)
+    print("🤖 NEXUS Telegram Bot ready. Type commands (or integrate with OpenClaw).")
+    print("Type /help for commands, /quit to exit.")
+    try:
+        while True:
+            msg = input("> ")
+            if msg in ("/quit", "exit", "q"):
+                break
+            print(bot.process_message(msg))
+    except (EOFError, KeyboardInterrupt):
+        print("\n👋 Bye!")
+
+
 def main():
     parser = argparse.ArgumentParser(
         prog="nexus",
@@ -242,6 +259,10 @@ def main():
     p_bt.add_argument("--exchange", "-e", default="mexc")
     p_bt.add_argument("--period", "-p", type=int, default=365, help="Days of data")
     p_bt.set_defaults(func=cmd_backtest)
+
+    # telegram
+    p_tg = subparsers.add_parser("telegram", help="Start Telegram bot mode")
+    p_tg.set_defaults(func=cmd_telegram)
 
     args = parser.parse_args()
     
