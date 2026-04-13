@@ -17,6 +17,7 @@ from pathlib import Path
 from .config import NexusConfig
 from .analysis.engine import SignalEngine
 from .analysis.backtest import BacktestEngine
+from .analysis.evolve import StrategyEvolver
 from .execution.engine import ExecutionEngine
 from .telegram.bot import TelegramBot
 
@@ -198,6 +199,32 @@ def cmd_start(args):
             time.sleep(60)
 
 
+def cmd_evolve(args):
+    """Evolve strategy parameters using genetic programming"""
+    evolver = StrategyEvolver(args.exchange)
+    print(f"\n🧬 Evolving strategies for {args.symbol}")
+    print(f"   Population: {args.population} | Generations: {args.generations}")
+    print(f"   Exchange: {args.exchange}\n")
+
+    results = evolver.evolve(args.symbol, args.population, args.generations)
+
+    if not results:
+        print("No viable strategies found.")
+        return
+
+    print(f"{'#':<4} {'Strategy':<12} {'Fitness':>8} {'Sharpe':>7} {'Return':>8} {'DD%':>6} {'Win%':>6} {'PF':>5} {'Trades':>6} {'Gen':>4}")
+    print("-" * 80)
+    for i, s in enumerate(results[:20], 1):
+        print(f"{i:<4} {s.strategy:<12} {s.fitness:>8.4f} {s.sharpe:>7.2f} {s.total_return:>+7.1f}% {s.max_drawdown:>5.1f}% {s.win_rate:>5.1f}% {s.profit_factor:>5.2f} {s.total_trades:>6} {s.generation:>4}")
+
+    best = results[0]
+    print(f"\n🏆 Best: {best.strategy} with params {best.params}")
+    print(f"   Fitness={best.fitness:.4f} Sharpe={best.sharpe:.2f} Return={best.total_return:+.1f}%")
+
+    if args.json:
+        print(json.dumps([s.to_dict() for s in results[:20]], indent=2))
+
+
 def cmd_telegram(args):
     """Start Telegram bot message processor (stdin mode for OpenClaw integration)"""
     config = NexusConfig.from_env()
@@ -259,6 +286,14 @@ def main():
     p_bt.add_argument("--exchange", "-e", default="mexc")
     p_bt.add_argument("--period", "-p", type=int, default=365, help="Days of data")
     p_bt.set_defaults(func=cmd_backtest)
+
+    # evolve
+    p_ev = subparsers.add_parser("evolve", help="Evolve strategy parameters")
+    p_ev.add_argument("symbol", help="Trading pair (e.g., BTC/USDT)")
+    p_ev.add_argument("--generations", "-g", type=int, default=5, help="Number of generations")
+    p_ev.add_argument("--population", "-p", type=int, default=20, help="Population size")
+    p_ev.add_argument("--exchange", "-e", default="mexc")
+    p_ev.set_defaults(func=cmd_evolve)
 
     # telegram
     p_tg = subparsers.add_parser("telegram", help="Start Telegram bot mode")
