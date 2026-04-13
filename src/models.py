@@ -7,7 +7,48 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timezone
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
+
+
+class StrategyType(Enum):
+    SCALP = "scalp"   # 1m charts, 500ms TTL
+    SWING = "swing"   # 1h charts, 5s TTL
+    LONG = "long"     # 1D charts, 30s TTL
+    CUSTOM = "custom" # User-defined TTL
+
+
+@dataclass
+class TTLConfig:
+    """Time-to-live settings for analysis decisions"""
+    strategy_type: StrategyType = StrategyType.SWING
+    timeout_seconds: float = 5.0
+    degrade_on_timeout: bool = True  # Fall back to technical-only
+    custom_timeout: Optional[float] = None  # For CUSTOM strategy type
+
+    # Default TTLs by strategy type
+    DEFAULT_TTLS: Dict[StrategyType, float] = field(default_factory=lambda: {
+        StrategyType.SCALP: 0.5,
+        StrategyType.SWING: 5.0,
+        StrategyType.LONG: 30.0,
+    })
+
+    def get_timeout(self) -> float:
+        """Return effective timeout in seconds"""
+        if self.strategy_type == StrategyType.CUSTOM and self.custom_timeout is not None:
+            timeout = self.custom_timeout
+        elif self.strategy_type == StrategyType.CUSTOM and self.custom_timeout is None:
+            logger.warning("CUSTOM strategy with no custom_timeout, falling back to SWING default (5s)")
+            timeout = self.DEFAULT_TTLS.get(StrategyType.SWING, 5.0)
+        else:
+            timeout = self.DEFAULT_TTLS.get(self.strategy_type, 5.0)
+        if timeout < 0.1:
+            raise ValueError(f"TTL timeout must be >= 0.1s, got {timeout}")
+        return timeout
+
+
 
 
 class SignalSide(Enum):

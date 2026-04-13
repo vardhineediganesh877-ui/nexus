@@ -6,9 +6,12 @@ Kelly criterion, correlation analysis, exposure controls.
 """
 
 import logging
-from typing import Dict, Optional
+from typing import Dict, Optional, TYPE_CHECKING
 from ..models import AgentOpinion, SignalSide, SignalStrength, TradeSignal
 from ..config import RiskConfig
+
+if TYPE_CHECKING:
+    from .correlation import CorrelationMatrix
 
 logger = logging.getLogger(__name__)
 
@@ -18,6 +21,18 @@ class RiskManager:
 
     def __init__(self, config: RiskConfig):
         self.config = config
+        self._correlation_matrix: Optional['CorrelationMatrix'] = None
+
+    @property
+    def correlation(self) -> 'CorrelationMatrix':
+        """Lazy-load correlation matrix (needs NexusConfig, not just RiskConfig)"""
+        if self._correlation_matrix is None:
+            raise RuntimeError("Call risk_mgr.set_correlation_matrix() first")
+        return self._correlation_matrix
+
+    def set_correlation_matrix(self, matrix: 'CorrelationMatrix') -> None:
+        """Inject correlation matrix dependency"""
+        self._correlation_matrix = matrix
 
     def check_signal(self, signal: TradeSignal, portfolio_value: float,
                      open_positions: list) -> AgentOpinion:
@@ -62,6 +77,26 @@ class RiskManager:
             if sl_pct > 0.05:  # More than 5% stop loss
                 risk_score -= 15
                 reasons.append(f"Wide stop loss ({sl_pct:.1%})")
+
+        # 7. Correlation check
+        existing_symbols = [p.get("symbol", "") for p in open_positions if p.get("symbol")]
+        if existing_symbols and self._correlation_matrix:
+            approved, correlated_with, corr_value = self._correlation_matrix.check_correlation(
+                signal.symbol, existing_symbols, self.config.max_correlation
+            )
+            if not approved:
+                if self.config.correlation_override:
+                    logger.warning(
+                        f"⚠️ HIGH CORRELATION OVERRIDE: {signal.symbol} ↔ {correlated_with} "
+                        f"(r={corr_value:.2f}) — override enabled, proceeding"
+                    )
+                    risk_score -= 10
+                    reasons.append(f"High correlation override: {signal.symbol}↔{correlated_with} (r={corr_value:.2f})")
+                else:
+                    risk_score -= 40
+                    reasons.append(
+                        f"High correlation: {signal.symbol}↔{correlated_with} (r={corr_value:.2f} > {self.config.max_correlation})"
+                    )
         
         # Determine approval
         approved = risk_score >= 50

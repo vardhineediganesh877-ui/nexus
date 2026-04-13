@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Optional, Dict, List
+from .models import TTLConfig, StrategyType
 
 DEFAULT_CONFIG_PATH = Path.home() / ".nexus" / "config.json"
 DEFAULT_DATA_DIR = Path.home() / ".nexus" / "data"
@@ -39,6 +40,9 @@ class RiskConfig:
     min_confidence: float = 0.65  # Minimum signal confidence to trade
     stop_loss_pct: float = 0.02  # Default 2% stop loss
     take_profit_pct: float = 0.05  # Default 5% take profit
+    max_correlation: float = 0.7       # Reject if > 0.7 correlation with existing position
+    correlation_override: bool = False  # Allow override (with warning log)
+    correlation_window_days: int = 30   # Rolling window for correlation calculation
 
 
 @dataclass
@@ -65,6 +69,7 @@ class NexusConfig:
     telegram_chat_id: str = ""
     log_level: str = "INFO"
     scan_interval_minutes: int = 30
+    ttl: TTLConfig = field(default_factory=TTLConfig)
 
     @classmethod
     def from_env(cls) -> "NexusConfig":
@@ -109,6 +114,19 @@ class NexusConfig:
 
         config.log_level = os.getenv("NEXUS_LOG_LEVEL", "INFO")
         config.scan_interval_minutes = int(os.getenv("NEXUS_SCAN_INTERVAL", "30"))
+
+        # TTL config
+        ttl_type = os.getenv("NEXUS_STRATEGY_TYPE", "swing").lower()
+        config.ttl = TTLConfig(
+            strategy_type=StrategyType(ttl_type),
+            timeout_seconds=float(os.getenv("NEXUS_TTL_SECONDS", "5.0")),
+            custom_timeout=float(os.getenv("NEXUS_TTL_CUSTOM", "0")) or None,
+        )
+
+        # Correlation config
+        config.risk.max_correlation = float(os.getenv("NEXUS_MAX_CORRELATION", "0.7"))
+        config.risk.correlation_override = os.getenv("NEXUS_CORRELATION_OVERRIDE", "false").lower() == "true"
+        config.risk.correlation_window_days = int(os.getenv("NEXUS_CORRELATION_WINDOW", "30"))
 
         return config
 

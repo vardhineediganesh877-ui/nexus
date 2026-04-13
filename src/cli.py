@@ -15,6 +15,7 @@ import logging
 from pathlib import Path
 
 from .config import NexusConfig
+from .models import StrategyType
 from .analysis.engine import SignalEngine
 from .analysis.backtest import BacktestEngine
 from .analysis.evolve import StrategyEvolver
@@ -35,6 +36,8 @@ def setup_logging(level: str = "INFO"):
 def cmd_analyze(args):
     """Analyze a single symbol"""
     config = NexusConfig.from_env()
+    if args.strategy:
+        config.ttl.strategy_type = StrategyType(args.strategy)
     engine = SignalEngine(config)
     
     signal = engine.analyze(args.symbol, args.exchange, args.timeframe)
@@ -152,6 +155,8 @@ def cmd_start(args):
     config = NexusConfig.from_env()
     if args.paper:
         config.paper_mode = True
+    if hasattr(args, 'strategy') and args.strategy:
+        config.ttl.strategy_type = StrategyType(args.strategy)
     
     engine = SignalEngine(config)
     executor = ExecutionEngine(config)
@@ -256,6 +261,9 @@ def main():
     p_analyze.add_argument("symbol", help="Trading pair (e.g., BTC/USDT)")
     p_analyze.add_argument("--exchange", "-e", default="mexc", help="Exchange")
     p_analyze.add_argument("--timeframe", "-tf", default="1h", help="Timeframe")
+    p_analyze.add_argument("--strategy", "-st", default="swing",
+                          choices=["scalp", "swing", "long", "custom"],
+                          help="Strategy type (affects TTL)")
     p_analyze.set_defaults(func=cmd_analyze)
 
     # scan
@@ -275,6 +283,9 @@ def main():
     p_start.add_argument("--live", action="store_true", help="Live trading (requires API keys)")
     p_start.add_argument("--top", "-n", type=int, default=10, help="Top N coins per scan")
     p_start.add_argument("--auto-execute", action="store_true", help="Auto-execute signals")
+    p_start.add_argument("--strategy", "-st", default="swing",
+                          choices=["scalp", "swing", "long", "custom"],
+                          help="Strategy type (affects TTL)")
     p_start.set_defaults(func=cmd_start)
 
     # backtest

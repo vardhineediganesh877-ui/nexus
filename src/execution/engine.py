@@ -16,6 +16,7 @@ import ccxt
 
 from ..models import Trade, TradeSignal, SignalSide
 from ..config import NexusConfig
+from ..analysis.correlation import CorrelationMatrix
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,7 @@ class ExecutionEngine:
         self.config = config
         self._exchanges: Dict[str, ccxt.Exchange] = {}
         self._db_path = config.data_dir / "trades.db"
+        self._correlation = CorrelationMatrix(config)
         self._init_db()
 
     def _init_db(self):
@@ -64,6 +66,15 @@ class ExecutionEngine:
                 unrealized_pnl REAL
             )
         """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS correlation_matrix (
+                symbol_a TEXT NOT NULL,
+                symbol_b TEXT NOT NULL,
+                correlation REAL NOT NULL,
+                computed_at TEXT NOT NULL,
+                PRIMARY KEY (symbol_a, symbol_b)
+            )
+        """)
         conn.commit()
         conn.close()
         logger.info(f"Trade DB initialized at {self._db_path}")
@@ -99,10 +110,39 @@ class ExecutionEngine:
         return exchange
 
     def execute(self, signal: TradeSignal, quantity: Optional[float] = None) -> Trade:
-        """Execute a trade based on a signal"""
+        """Execute a trade based on a signal (with correlation check)"""
         if signal.side == SignalSide.HOLD:
             logger.info(f"No trade: HOLD signal for {signal.symbol}")
             return Trade(symbol=signal.symbol, exchange=signal.exchange, status="cancelled")
+
+        # CORRELATION CHECK
+        open_positions = self.get_open_positions()
+        existing_symbols = list(set(p.symbol for p in open_positions))
+        
+        if existing_symbols:
+            approved, correlated_with, corr_value = self._correlation.check_correlation(
+                signal.symbol, existing_symbols, self.config.risk.max_correlation
+            )
+            if not approved:
+                if not self.config.risk.correlation_override:
+                    logger.warning(
+                        f"🚫 TRADE BLOCKED: {signal.symbol} ↔ {correlated_with} "
+                        f"correlation={corr_value:.2f} > threshold={self.config.risk.max_correlation}"
+                    )
+                    trade = Trade(
+                        symbol=signal.symbol,
+                        exchange=signal.exchange,
+                        status="cancelled",
+                        metadata={
+                            "blocked_reason": "high_correlation",
+                            "correlated_with": correlated_with,
+                            "correlation": corr_value,
+                        },
+                    )
+                    self._save_trade(trade)
+                    return trade
+                else:
+                    logger.warning(f"⚠️ High correlation override for {signal.symbol}")
 
         trade = Trade(
             signal_id=signal.id,

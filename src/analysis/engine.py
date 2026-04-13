@@ -5,6 +5,8 @@ This is the brain. It runs Technical, Sentiment, and Risk agents,
 weights their opinions, and produces a final trade signal.
 """
 
+import asyncio
+import concurrent.futures
 import logging
 from typing import List, Optional, Dict
 from datetime import datetime, timezone
@@ -61,10 +63,23 @@ class SignalEngine:
         self._exchanges[exchange_id] = exchange
         return exchange
 
-    def analyze(self, symbol: str, exchange_id: str = "binance",
-                timeframe: str = "1h") -> TradeSignal:
-        """Run full multi-agent analysis on a symbol"""
+    async def analyze_async(self, symbol: str, exchange_id: str = "binance",
+                            timeframe: str = "1h") -> TradeSignal:
+        """Async version of analyze with TTL timeout support"""
+        ttl = self.config.ttl.get_timeout()
         
+        try:
+            return await asyncio.wait_for(
+                self._analyze_full(symbol, exchange_id, timeframe),
+                timeout=ttl,
+            )
+        except asyncio.TimeoutError:
+            logger.warning(f"Analysis TTL exceeded ({ttl}s) for {symbol}, degrading to technical-only")
+            return await self._analyze_technical_only(symbol, exchange_id, timeframe)
+
+    async def _analyze_full(self, symbol: str, exchange_id: str,
+                            timeframe: str) -> TradeSignal:
+        """Full multi-agent analysis (runs within TTL)"""
         signal = TradeSignal(
             symbol=symbol,
             exchange=exchange_id,
@@ -75,12 +90,11 @@ class SignalEngine:
         try:
             exchange = self._get_exchange(exchange_id)
             
-            # 1. Technical Analysis (heaviest weight)
+            # 1. Technical Analysis
             technical = TechnicalAnalyst(exchange)
             tech_opinion = technical.analyze(symbol, timeframe)
             signal.opinions.append(tech_opinion)
             
-            # Extract entry/SL/TP from technical analysis
             if tech_opinion.indicators:
                 signal.entry_price = tech_opinion.indicators.get("entry")
                 signal.stop_loss = tech_opinion.indicators.get("stop_loss")
@@ -94,20 +108,18 @@ class SignalEngine:
             # 3. Calculate weighted consensus
             signal = self._compute_consensus(signal)
 
-            # 4. Risk Management (veto power)
+            # 4. Risk Management
             risk_mgr = RiskManager(self.config.risk)
             risk_opinion = risk_mgr.analyze(signal, portfolio_value=10000)
             signal.opinions.append(risk_opinion)
 
-            # Risk can veto the signal
             if not risk_opinion.indicators.get("approved", True):
                 signal.side = SignalSide.HOLD
                 signal.strength = SignalStrength.NEUTRAL
-                signal.confidence *= 0.3  # Heavily reduce confidence
+                signal.confidence *= 0.3
             else:
                 signal.position_size_pct = risk_opinion.indicators.get("position_size_pct", 0)
 
-            # Calculate risk/reward
             if signal.entry_price and signal.stop_loss and signal.take_profit:
                 risk = abs(signal.entry_price - signal.stop_loss)
                 reward = abs(signal.take_profit - signal.entry_price)
@@ -124,6 +136,62 @@ class SignalEngine:
             signal.confidence = 0
 
         return signal
+
+    async def _analyze_technical_only(self, symbol: str, exchange_id: str,
+                                      timeframe: str) -> TradeSignal:
+        """Degraded analysis — technical only, used when TTL expires"""
+        signal = TradeSignal(
+            symbol=symbol,
+            exchange=exchange_id,
+            timeframe=timeframe,
+            timestamp=datetime.now(timezone.utc),
+        )
+        signal.metadata["degraded"] = True
+        signal.metadata["degradation_reason"] = "ttl_expired"
+
+        try:
+            exchange = self._get_exchange(exchange_id)
+            technical = TechnicalAnalyst(exchange)
+            tech_opinion = technical.analyze(symbol, timeframe)
+            signal.opinions.append(tech_opinion)
+            
+            if tech_opinion.indicators:
+                signal.entry_price = tech_opinion.indicators.get("entry")
+                signal.stop_loss = tech_opinion.indicators.get("stop_loss")
+                signal.take_profit = tech_opinion.indicators.get("take_profit")
+
+            # Technical-only consensus (reduced weight)
+            signal = self._compute_consensus(signal)
+            
+            # Reduce confidence for degraded signal
+            signal.confidence *= 0.7
+            signal.metadata["confidence_penalty"] = "0.7x (degraded)"
+
+        except Exception as e:
+            logger.error(f"Technical-only analysis also failed for {symbol}: {e}")
+            signal.side = SignalSide.HOLD
+            signal.confidence = 0
+
+        return signal
+
+    def analyze(self, symbol: str, exchange_id: str = "binance",
+                timeframe: str = "1h") -> TradeSignal:
+        """Synchronous analyze — uses TTL if configured"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+        
+        if loop and loop.is_running():
+            # Already in async context — run in thread
+            with concurrent.futures.ThreadPoolExecutor() as pool:
+                future = pool.submit(
+                    asyncio.run,
+                    self.analyze_async(symbol, exchange_id, timeframe)
+                )
+                return future.result(timeout=self.config.ttl.get_timeout() + 1)
+        else:
+            return asyncio.run(self.analyze_async(symbol, exchange_id, timeframe))
 
     def _compute_consensus(self, signal: TradeSignal) -> TradeSignal:
         """Weight agent opinions into consensus signal"""
