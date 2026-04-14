@@ -99,6 +99,9 @@ class AlertManager:
             self._skipped_count += 1
             return None
 
+        # Set cooldown immediately after check passes (even if send fails later)
+        self._cooldown[signal.symbol] = time.time()
+
         # Check against rules
         actionable = False
         for rule in self.rules:
@@ -138,7 +141,6 @@ class AlertManager:
             await self.send_fn(alert.message)
             alert.sent = True
             self._sent_count += 1
-            self._cooldown[alert.signal.symbol] = time.time()
             logger.info(f"Alert sent: {alert.signal.symbol} {alert.signal.side.value}")
             return True
         except Exception as e:
