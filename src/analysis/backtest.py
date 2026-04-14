@@ -12,6 +12,7 @@ from datetime import datetime
 import ccxt
 
 from ..models import BacktestResult, Trade, SignalSide
+from .ccxt_helpers import retry_exchange, safe_fetch_ohlcv
 
 logger = logging.getLogger(__name__)
 
@@ -23,11 +24,14 @@ class BacktestEngine:
 
     def __init__(self, exchange_id: str = "mexc"):
         self.exchange_id = exchange_id
+        self._exchange = None  # Cached exchange instance
 
+    @retry_exchange(max_retries=2, base_delay=2.0)
     def _get_ohlcv(self, symbol: str, timeframe: str = "1d", limit: int = 500):
-        """Fetch historical data"""
-        exchange = ccxt.__dict__[self.exchange_id]({"rateLimit": 1000})
-        return exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        """Fetch historical data (cached exchange instance)"""
+        if self._exchange is None:
+            self._exchange = ccxt.__dict__[self.exchange_id]({"rateLimit": 1000})
+        return safe_fetch_ohlcv(self._exchange, symbol, timeframe, limit=limit)
 
     def _run_strategy(self, closes: List[float], strategy: str) -> List[dict]:
         """Run a strategy on closing prices, return list of trades"""
@@ -49,17 +53,26 @@ class BacktestEngine:
         return trades
 
     def _strategy_rsi(self, closes: List[float], period: int = 14) -> List[dict]:
-        """RSI: Buy oversold (<30), Sell overbought (>70)"""
+        """RSI: Buy oversold (<30), Sell overbought (>70) — O(n) with running averages"""
         trades = []
         position = None
 
+        if len(closes) < period + 1:
+            return trades
+
+        # Seed running averages from first period
+        deltas = [closes[j] - closes[j-1] for j in range(1, period + 1)]
+        avg_gain = sum(max(d, 0) for d in deltas) / period
+        avg_loss = sum(abs(min(d, 0)) for d in deltas) / period
+
         for i in range(period + 1, len(closes)):
-            # Simplified RSI
-            deltas = [closes[j] - closes[j-1] for j in range(i - period, i)]
-            gains = [max(d, 0) for d in deltas]
-            losses = [abs(min(d, 0)) for d in deltas]
-            avg_gain = sum(gains) / period
-            avg_loss = sum(losses) / period
+            # Update running averages incrementally
+            delta = closes[i] - closes[i-1]
+            gain = max(delta, 0)
+            loss = abs(min(delta, 0))
+            avg_gain = (avg_gain * (period - 1) + gain) / period
+            avg_loss = (avg_loss * (period - 1) + loss) / period
+
             rsi = 100 - (100 / (1 + avg_gain / avg_loss)) if avg_loss > 0 else 100
 
             if position is None and rsi < 30:
@@ -87,15 +100,26 @@ class BacktestEngine:
         return trades
 
     def _strategy_bollinger(self, closes: List[float], period: int = 20, std: float = 2.0) -> List[dict]:
-        """Bollinger: Buy at lower band, sell at middle"""
+        """Bollinger: Buy at lower band, sell at middle — O(n) with running stats"""
         trades = []
         position = None
 
+        if len(closes) < period:
+            return trades
+
+        # Seed with first window
+        window_sum = sum(closes[:period])
+        window_sq_sum = sum(p * p for p in closes[:period])
+
         for i in range(period, len(closes)):
-            window = closes[i-period:i]
-            middle = sum(window) / period
-            variance = sum((p - middle) ** 2 for p in window) / period
-            sd = variance ** 0.5
+            # Update running sums incrementally
+            if i > period:
+                window_sum += closes[i-1] - closes[i-period-1]
+                window_sq_sum += closes[i-1]**2 - closes[i-period-1]**2
+
+            middle = window_sum / period
+            variance = window_sq_sum / period - middle * middle
+            sd = max(variance, 0) ** 0.5
             upper = middle + std * sd
             lower = middle - std * sd
 
@@ -118,30 +142,49 @@ class BacktestEngine:
         return trades
 
     def _strategy_macd(self, closes: List[float]) -> List[dict]:
-        """MACD: Buy on golden cross, sell on death cross"""
+        """MACD: Buy on golden cross, sell on death cross (O(n) with incremental EMA)"""
         trades = []
         position = None
         prev_hist = None
 
-        # Calculate MACD history
-        macd_history = []
-        for i in range(27, len(closes)):
-            ema12 = self._ema(closes[:i+1], 12)
-            ema26 = self._ema(closes[:i+1], 26)
-            macd_val = ema12 - ema26
-            macd_history.append(macd_val)
+        if len(closes) < 27:
+            return trades
 
-        # Signal line
-        for i in range(9, len(macd_history)):
-            signal = self._ema(macd_history[:i+1], 9)
-            hist = macd_history[i] - signal
+        # Incremental EMA computation — O(n) not O(n²)
+        def _ema_series(prices, period):
+            """Return full EMA series from prices"""
+            if len(prices) < period:
+                return []
+            mult = 2 / (period + 1)
+            ema = sum(prices[:period]) / period
+            result = [ema]
+            for p in prices[period:]:
+                ema = (p - ema) * mult + ema
+                result.append(ema)
+            return result
+
+        ema12_series = _ema_series(closes, 12)
+        ema26_series = _ema_series(closes, 26)
+
+        # MACD line (align series — ema26 starts later)
+        offset = len(ema12_series) - len(ema26_series)
+        macd_history = [ema12_series[i + offset] - ema26_series[i] for i in range(len(ema26_series))]
+
+        # Signal line (incremental EMA of MACD)
+        signal_series = _ema_series(macd_history, 9) if len(macd_history) >= 9 else []
+
+        for i in range(len(signal_series)):
+            macd_idx = i + 9 - 1  # index into macd_history
+            hist = macd_history[macd_idx] - signal_series[i]
 
             if prev_hist is not None:
+                idx = 26 + macd_idx  # 26 from slow EMA offset + macd_idx
+                if idx >= len(closes):
+                    prev_hist = hist
+                    continue
                 if prev_hist <= 0 and hist > 0 and position is None:  # Golden cross
-                    idx = 27 + i
                     position = {"entry": closes[idx], "entry_idx": idx}
                 elif prev_hist >= 0 and hist < 0 and position is not None:  # Death cross
-                    idx = 27 + i
                     pnl_pct = (closes[idx] - position["entry"]) / position["entry"] * 100
                     trades.append({"entry": position["entry"], "exit": closes[idx], "pnl_pct": pnl_pct, "hold_bars": idx - position["entry_idx"]})
                     position = None
@@ -155,22 +198,42 @@ class BacktestEngine:
         return trades
 
     def _strategy_ema_cross(self, closes: List[float], fast: int = 20, slow: int = 50) -> List[dict]:
-        """EMA Cross: Buy when fast > slow, sell on reversal"""
+        """EMA Cross: Buy when fast > slow, sell on reversal (O(n) with incremental EMA)"""
         trades = []
         position = None
         prev_fast = None
         prev_slow = None
 
-        for i in range(slow, len(closes)):
-            fast_ema = self._ema(closes[:i+1], fast)
-            slow_ema = self._ema(closes[:i+1], slow)
+        if len(closes) < slow:
+            return trades
+
+        # Precompute EMA series incrementally
+        def _ema_series(prices, period):
+            if len(prices) < period:
+                return []
+            mult = 2 / (period + 1)
+            ema = sum(prices[:period]) / period
+            result = [ema]
+            for p in prices[period:]:
+                ema = (p - ema) * mult + ema
+                result.append(ema)
+            return result
+
+        fast_series = _ema_series(closes, fast)
+        slow_series = _ema_series(closes, slow)
+        offset = len(fast_series) - len(slow_series)
+
+        for i in range(len(slow_series)):
+            fast_ema = fast_series[i + offset]
+            slow_ema = slow_series[i]
+            idx = slow - 1 + i  # actual index into closes
 
             if prev_fast is not None:
                 if prev_fast <= prev_slow and fast_ema > slow_ema and position is None:
-                    position = {"entry": closes[i], "entry_idx": i}
+                    position = {"entry": closes[idx], "entry_idx": idx}
                 elif prev_fast >= prev_slow and fast_ema < slow_ema and position is not None:
-                    pnl_pct = (closes[i] - position["entry"]) / position["entry"] * 100
-                    trades.append({"entry": position["entry"], "exit": closes[i], "pnl_pct": pnl_pct, "hold_bars": i - position["entry_idx"]})
+                    pnl_pct = (closes[idx] - position["entry"]) / position["entry"] * 100
+                    trades.append({"entry": position["entry"], "exit": closes[idx], "pnl_pct": pnl_pct, "hold_bars": idx - position["entry_idx"]})
                     position = None
 
             prev_fast, prev_slow = fast_ema, slow_ema

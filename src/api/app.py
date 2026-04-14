@@ -102,7 +102,7 @@ async def scan(
     top_n: int = Query(10, ge=1, le=50),
 ):
     try:
-        signals = signal_engine.scan(exchange_id=exchange, top_n=top_n)
+        signals = await signal_engine.scan_async(exchange_id=exchange, top_n=top_n)
         return {"count": len(signals), "signals": [s.to_dict() for s in signals]}
     except Exception as e:
         logger.error(f"Scan failed: {e}")
@@ -211,8 +211,9 @@ async def ticker(symbol: str, exchange: str = Query("binance")):
         ex_class = getattr(ccxt, exchange, None)
         if not ex_class:
             raise HTTPException(status_code=400, detail=f"Exchange {exchange} not supported")
+        from src.analysis.ccxt_helpers import safe_fetch_ticker
         ex = ex_class({"rateLimit": 1000})
-        t = ex.fetch_ticker(symbol)
+        t = safe_fetch_ticker(ex, symbol)
         return {
             "symbol": t["symbol"],
             "last": t["last"],

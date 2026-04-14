@@ -11,6 +11,7 @@ from typing import Dict, List, Optional, Any
 from datetime import datetime
 
 from ..models import AgentOpinion, SignalSide, SignalStrength, TradeSignal
+from .ccxt_helpers import retry_exchange
 
 logger = logging.getLogger(__name__)
 
@@ -24,23 +25,31 @@ class TechnicalAnalyst:
     STRONG_RSI_OVERSOLD = 20
     STRONG_RSI_OVERBOUGHT = 80
 
-    def __init__(self, exchange: ccxt.Exchange):
+    def __init__(self, exchange: ccxt.Exchange, cache_ttl: int = 300):
         self.exchange = exchange
         self._cache: Dict[str, Any] = {}
         self._cache_time: Dict[str, datetime] = {}
+        self._cache_ttl = cache_ttl  # seconds
 
+    @retry_exchange(max_retries=3, base_delay=1.0)
     def _get_ohlcv(self, symbol: str, timeframe: str = "1h", limit: int = 200) -> List[list]:
-        """Fetch OHLCV data from exchange"""
+        """Fetch OHLCV data from exchange (with TTL cache)"""
+        from datetime import datetime as _dt
         cache_key = f"{symbol}_{timeframe}"
+        now = _dt.utcnow()
         
-        try:
-            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
-            if not ohlcv:
-                raise ValueError(f"No OHLCV data for {symbol}")
-            return ohlcv
-        except Exception as e:
-            logger.error(f"Failed to fetch OHLCV for {symbol}: {e}")
-            raise
+        if cache_key in self._cache and cache_key in self._cache_time:
+            age = (now - self._cache_time[cache_key]).total_seconds()
+            if age < self._cache_ttl:
+                return self._cache[cache_key]
+        
+        ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        if not ohlcv:
+            raise ValueError(f"No OHLCV data for {symbol}")
+        
+        self._cache[cache_key] = ohlcv
+        self._cache_time[cache_key] = now
+        return ohlcv
 
     def _compute_indicators(self, ohlcv: List[list]) -> Dict[str, Any]:
         """Compute technical indicators from OHLCV data"""

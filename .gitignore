@@ -9,3 +9,6 @@ build/
 *.db
 .idea/
 .vscode/
+venv/
+__pycache__/
+*.pyc

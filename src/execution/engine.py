@@ -29,11 +29,19 @@ class ExecutionEngine:
         self._exchanges: Dict[str, ccxt.Exchange] = {}
         self._db_path = config.data_dir / "trades.db"
         self._correlation = CorrelationMatrix(config)
+        self._conn: Optional[sqlite3.Connection] = None
         self._init_db()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        """Get persistent database connection"""
+        if self._conn is None:
+            self._conn = sqlite3.connect(str(self._db_path), check_same_thread=False)
+            self._conn.row_factory = sqlite3.Row
+        return self._conn
 
     def _init_db(self):
         """Initialize SQLite database for trade tracking"""
-        conn = sqlite3.connect(str(self._db_path))
+        conn = self._get_conn()
         conn.execute("""
             CREATE TABLE IF NOT EXISTS trades (
                 id TEXT PRIMARY KEY,
@@ -76,7 +84,6 @@ class ExecutionEngine:
             )
         """)
         conn.commit()
-        conn.close()
         logger.info(f"Trade DB initialized at {self._db_path}")
 
     def _get_exchange(self, exchange_id: str) -> ccxt.Exchange:
@@ -162,7 +169,8 @@ class ExecutionEngine:
             exchange = self._get_exchange(signal.exchange)
             
             # Get current price
-            ticker = exchange.fetch_ticker(signal.symbol)
+            from ..analysis.ccxt_helpers import safe_fetch_ticker
+            ticker = safe_fetch_ticker(exchange, signal.symbol)
             trade.entry_price = ticker["last"]
             
             # Calculate quantity
@@ -220,7 +228,8 @@ class ExecutionEngine:
             exchange = self._get_exchange(trade.exchange)
             
             if exit_price is None:
-                ticker = exchange.fetch_ticker(trade.symbol)
+                from ..analysis.ccxt_helpers import safe_fetch_ticker
+                ticker = safe_fetch_ticker(exchange, trade.symbol)
                 exit_price = ticker["last"]
 
             trade.exit_price = exit_price
@@ -247,28 +256,24 @@ class ExecutionEngine:
 
     def get_open_positions(self) -> List[Trade]:
         """Get all open positions"""
-        conn = sqlite3.connect(str(self._db_path))
-        conn.row_factory = sqlite3.Row
+        conn = self._get_conn()
         rows = conn.execute(
             "SELECT * FROM trades WHERE status = 'open' ORDER BY timestamp_opened DESC"
         ).fetchall()
-        conn.close()
         return [self._row_to_trade(r) for r in rows]
 
     def get_trade_history(self, limit: int = 50) -> List[Trade]:
         """Get recent trade history"""
-        conn = sqlite3.connect(str(self._db_path))
-        conn.row_factory = sqlite3.Row
+        conn = self._get_conn()
         rows = conn.execute(
             "SELECT * FROM trades WHERE status = 'closed' ORDER BY timestamp_closed DESC LIMIT ?",
             (limit,)
         ).fetchall()
-        conn.close()
         return [self._row_to_trade(r) for r in rows]
 
     def get_portfolio_summary(self) -> Dict:
         """Get portfolio performance summary"""
-        conn = sqlite3.connect(str(self._db_path))
+        conn = self._get_conn()
         
         # Total trades
         total = conn.execute("SELECT COUNT(*) FROM trades").fetchone()[0]
@@ -287,8 +292,6 @@ class ExecutionEngine:
                 MIN(pnl) as worst_trade
             FROM trades WHERE status = 'closed' AND pnl IS NOT NULL
         """).fetchone()
-        
-        conn.close()
         
         wins = closed[1] or 0
         count = closed[0] or 0
@@ -310,7 +313,7 @@ class ExecutionEngine:
 
     def _save_trade(self, trade: Trade):
         """Save trade to SQLite"""
-        conn = sqlite3.connect(str(self._db_path))
+        conn = self._get_conn()
         conn.execute("""
             INSERT OR REPLACE INTO trades 
             (id, signal_id, symbol, exchange, side, entry_price, quantity,
@@ -327,7 +330,6 @@ class ExecutionEngine:
             json.dumps(trade.metadata),
         ))
         conn.commit()
-        conn.close()
 
     @staticmethod
     def _row_to_trade(row: sqlite3.Row) -> Trade:

@@ -18,6 +18,9 @@ from ..config import NexusConfig, ExchangeConfig
 from .technical import TechnicalAnalyst
 from .sentiment import SentimentAnalyst
 from .risk import RiskManager
+from .correlation import CorrelationMatrix
+from .rate_limited import RateLimitedExchange, RateLimitConfig
+from .ccxt_helpers import retry_exchange, safe_fetch_tickers
 
 logger = logging.getLogger(__name__)
 
@@ -35,7 +38,9 @@ class SignalEngine:
 
     def __init__(self, config: NexusConfig):
         self.config = config
-        self._exchanges: Dict[str, ccxt.Exchange] = {}
+        self._exchanges: Dict[str, RateLimitedExchange] = {}
+        self._correlation_matrix = CorrelationMatrix(config)
+        self._risk_mgr: Optional[RiskManager] = None
 
     def _get_exchange(self, exchange_id: str = "binance") -> ccxt.Exchange:
         """Get or create exchange instance"""
@@ -60,8 +65,10 @@ class SignalEngine:
                     kwargs["urls"] = {"api": {"public": "https://testnet.binance.vision", "private": "https://testnet.binance.vision"}}
         
         exchange = exchange_class(kwargs)
-        self._exchanges[exchange_id] = exchange
-        return exchange
+        # Wrap with rate limiting (transparent proxy — analysts call fetch_ohlcv etc. as before)
+        safe_exchange = RateLimitedExchange(exchange)
+        self._exchanges[exchange_id] = safe_exchange
+        return safe_exchange
 
     async def analyze_async(self, symbol: str, exchange_id: str = "binance",
                             timeframe: str = "1h") -> TradeSignal:
@@ -101,16 +108,18 @@ class SignalEngine:
                 signal.take_profit = tech_opinion.indicators.get("take_profit")
 
             # 2. Sentiment Analysis
-            sentiment = SentimentAnalyst()
+            sentiment = SentimentAnalyst(exchange)
             sent_opinion = sentiment.analyze(symbol)
             signal.opinions.append(sent_opinion)
 
             # 3. Calculate weighted consensus
             signal = self._compute_consensus(signal)
 
-            # 4. Risk Management
-            risk_mgr = RiskManager(self.config.risk)
-            risk_opinion = risk_mgr.analyze(signal, portfolio_value=10000)
+            # 4. Risk Management (cached instance with correlation matrix)
+            if self._risk_mgr is None:
+                self._risk_mgr = RiskManager(self.config.risk)
+                self._risk_mgr.set_correlation_matrix(self._correlation_matrix)
+            risk_opinion = self._risk_mgr.analyze(signal, portfolio_value=10000)
             signal.opinions.append(risk_opinion)
 
             if not risk_opinion.indicators.get("approved", True):
@@ -238,21 +247,76 @@ class SignalEngine:
 
     def scan(self, exchange_id: str = "binance", base: str = "USDT",
              top_n: int = 10) -> List[TradeSignal]:
-        """Scan top coins on an exchange and rank by signal strength"""
+        """Scan top coins on an exchange and rank by signal strength (sync wrapper)"""
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            loop = None
+
+        if loop and loop.is_running():
+            # Already in async context — run in thread pool to avoid blocking
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+                future = pool.submit(self._scan_sync, exchange_id, base, top_n)
+                return future.result(timeout=120)
+        else:
+            return self._scan_sync(exchange_id, base, top_n)
+
+    async def scan_async(self, exchange_id: str = "binance", base: str = "USDT",
+                         top_n: int = 10) -> List[TradeSignal]:
+        """Async scan — analyzes top N coins in parallel using asyncio.gather."""
         try:
             exchange = self._get_exchange(exchange_id)
-            
+
+            # Get top coins by volume (single API call with retry)
+            tickers = await asyncio.to_thread(safe_fetch_tickers, exchange)
+
+            # Filter pairs by volume
+            usdt_pairs = [
+                (symbol, ticker["quoteVolume"])
+                for symbol, ticker in tickers.items()
+                if base in symbol and ticker.get("quoteVolume", 0) > 1_000_000
+            ]
+            usdt_pairs.sort(key=lambda x: x[1], reverse=True)
+
+            # Analyze top N in parallel via thread pool
+            loop = asyncio.get_running_loop()
+            tasks = []
+            for symbol, _ in usdt_pairs[:top_n]:
+                tasks.append(loop.run_in_executor(None, self.analyze, symbol, exchange_id))
+
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+
+            signals = []
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.warning(f"Scan task failed: {result}")
+                    continue
+                if result.side != SignalSide.HOLD:
+                    signals.append(result)
+
+            signals.sort(key=lambda s: s.confidence, reverse=True)
+            return signals
+
+        except Exception as e:
+            logger.error(f"Async scan failed: {e}")
+            return []
+
+    def _scan_sync(self, exchange_id: str, base: str, top_n: int) -> List[TradeSignal]:
+        """Internal synchronous scan implementation."""
+        try:
+            exchange = self._get_exchange(exchange_id)
+
             # Get top coins by volume
-            tickers = exchange.fetch_tickers()
-            
-            # Filter USDT pairs and sort by volume
+            tickers = safe_fetch_tickers(exchange)
+
+            # Filter pairs by volume
             usdt_pairs = []
             for symbol, ticker in tickers.items():
                 if base in symbol and ticker.get("quoteVolume", 0) > 1_000_000:
                     usdt_pairs.append((symbol, ticker["quoteVolume"]))
-            
+
             usdt_pairs.sort(key=lambda x: x[1], reverse=True)
-            
+
             # Analyze top N
             signals = []
             for symbol, _ in usdt_pairs[:top_n]:
@@ -262,7 +326,7 @@ class SignalEngine:
                         signals.append(sig)
                 except Exception as e:
                     logger.warning(f"Scan failed for {symbol}: {e}")
-            
+
             # Sort by confidence
             signals.sort(key=lambda s: s.confidence, reverse=True)
             return signals

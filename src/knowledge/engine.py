@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 from ..models import Trade, TradeSignal
 
+BUN_BIN = "/root/.bun/bin/bun"
 GBRAIN_CLI = "/root/.bun/bin/gbrain"
 BRAIN_DIR = Path("/root/.openclaw/workspace/brain")
 CONCEPTS_DIR = BRAIN_DIR / "concepts"
@@ -27,7 +28,8 @@ class KnowledgeEngine:
         self.brain_dir = Path(brain_dir)
         self.concepts_dir = self.brain_dir / "concepts"
         self.companies_dir = self.brain_dir / "companies"
-        self._gbrain = GBRAIN_CLI
+        # gbrain is a symlink to a .ts file — must be run via bun
+        self._gbrain_cmd = [BUN_BIN, GBRAIN_CLI]
         # Ensure dirs exist
         self.concepts_dir.mkdir(parents=True, exist_ok=True)
         self.companies_dir.mkdir(parents=True, exist_ok=True)
@@ -43,30 +45,34 @@ class KnowledgeEngine:
         return self.concepts_dir / f"{self._slug(symbol)}.md"
 
     def _gbrain_call(self, operation: str, payload: dict) -> Optional[dict]:
-        """Call a gbrain operation via CLI."""
+        """Call a gbrain operation via CLI (run through bun)."""
         try:
             result = subprocess.run(
-                [self._gbrain, "call", operation, json.dumps(payload)],
+                self._gbrain_cmd + ["call", operation, json.dumps(payload)],
                 capture_output=True, text=True, timeout=15,
             )
             if result.returncode == 0 and result.stdout.strip():
                 return json.loads(result.stdout.strip())
-        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError):
-            pass
+            elif result.returncode != 0 and result.stderr:
+                logger.warning(f"gbrain call failed: {result.stderr[:200]}")
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, FileNotFoundError) as e:
+            logger.debug(f"gbrain call error ({operation}): {e}")
         return None
 
     def _gbrain_search(self, query: str) -> list:
-        """Search gbrain for pages matching query."""
+        """Search gbrain for pages matching query (run through bun)."""
         try:
             result = subprocess.run(
-                [self._gbrain, "search", query],
+                self._gbrain_cmd + ["search", query],
                 capture_output=True, text=True, timeout=10,
             )
             if result.returncode == 0 and result.stdout.strip():
                 # gbrain search returns results as text lines
                 return result.stdout.strip().split("\n")
-        except (subprocess.TimeoutExpired, FileNotFoundError):
-            pass
+            elif result.returncode != 0 and result.stderr:
+                logger.warning(f"gbrain search failed: {result.stderr[:200]}")
+        except (subprocess.TimeoutExpired, FileNotFoundError) as e:
+            logger.debug(f"gbrain search error: {e}")
         return []
 
     def _write_or_append_page(self, path: Path, section: str, content: str) -> None:

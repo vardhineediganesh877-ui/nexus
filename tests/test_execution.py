@@ -36,12 +36,11 @@ class TestDBInit:
 class TestPaperTrade:
     def test_execute_creates_record(self, engine):
         sig = make_signal()
-        mock_ticker = {"last": 50000.0}
-        with patch.object(engine, '_get_exchange') as mock_ex:
-            ex = MagicMock()
-            ex.fetch_ticker.return_value = mock_ticker
-            mock_ex.return_value = ex
-            trade = engine.execute(sig)
+        with patch("src.analysis.ccxt_helpers.safe_fetch_ticker", return_value={"last": 50000.0}):
+            with patch.object(engine, '_get_exchange') as mock_ex:
+                ex = MagicMock()
+                mock_ex.return_value = ex
+                trade = engine.execute(sig)
 
         assert trade.status == "open"
         assert trade.entry_price == 50000.0
@@ -66,11 +65,11 @@ class TestPortfolioSummary:
 
     def test_after_trade(self, engine):
         sig = make_signal()
-        with patch.object(engine, '_get_exchange') as mock_ex:
-            ex = MagicMock()
-            ex.fetch_ticker.return_value = {"last": 50000.0}
-            mock_ex.return_value = ex
-            engine.execute(sig)
+        with patch("src.analysis.ccxt_helpers.safe_fetch_ticker", return_value={"last": 50000.0}):
+            with patch.object(engine, '_get_exchange') as mock_ex:
+                ex = MagicMock()
+                mock_ex.return_value = ex
+                engine.execute(sig)
 
         summary = engine.get_portfolio_summary()
         assert summary["total_trades"] == 1
@@ -81,18 +80,18 @@ class TestTradeHistory:
     def test_returns_closed_trades(self, engine):
         # Execute and close a trade
         sig = make_signal()
-        with patch.object(engine, '_get_exchange') as mock_ex:
-            ex = MagicMock()
-            ex.fetch_ticker.return_value = {"last": 50000.0}
-            mock_ex.return_value = ex
-            trade = engine.execute(sig)
+        with patch("src.analysis.ccxt_helpers.safe_fetch_ticker", return_value={"last": 50000.0}):
+            with patch.object(engine, '_get_exchange') as mock_ex:
+                ex = MagicMock()
+                mock_ex.return_value = ex
+                trade = engine.execute(sig)
 
         # Close it
-        with patch.object(engine, '_get_exchange') as mock_ex:
-            ex = MagicMock()
-            ex.fetch_ticker.return_value = {"last": 52000.0}
-            mock_ex.return_value = ex
-            engine.close_position(trade, exit_price=52000.0)
+        with patch("src.analysis.ccxt_helpers.safe_fetch_ticker", return_value={"last": 52000.0}):
+            with patch.object(engine, '_get_exchange') as mock_ex:
+                ex = MagicMock()
+                mock_ex.return_value = ex
+                engine.close_position(trade, exit_price=52000.0)
 
         history = engine.get_trade_history()
         assert len(history) == 1
